@@ -1,82 +1,144 @@
-# sinowealth-mouse-macos (`nos-m700`)
+# Sinowealth Mouse for macOS
 
-**Turn off the RGB / DPI-indicator / scroll-wheel LED on Sinowealth-based gaming mice from
-macOS.** It's a small command-line tool with no Windows software, no kernel extension and no
-background app. Built and verified on the **NOS M-700 RGB**. The same controller and
-protocol are used by the Glorious Model O/D and many budget "Model O clones" (list below).
+`sinowealth-mouse` is a small userspace macOS configuration utility for **Sinowealth-based
+gaming mice**, the controller family behind the Glorious Model O/D and many budget
+"Model O clones". It talks to the mouse directly over USB HID through IOKit's
+**IOHIDManager**: no kernel extension, no daemon, no vendor software. Settings are written to
+the mouse's own flash, so they survive re-plugging and carry over to other computers.
 
-It's plain userspace C against IOKit's IOHIDManager: no kernel driver, no
-background daemon and no vendor software. The setting is stored in the mouse's own flash, so
-it survives re-plugging and carries over to other computers.
+Its main job today is **turning off the scroll-wheel / DPI-indicator LED**, which most vendor
+software can't do. The first device confirmed on real hardware is the **NOS M-700 RGB**.
 
 ```bash
-sudo nos-m700 light off     # scroll-wheel LED off (scrolling is unaffected)
-sudo nos-m700 light on      # colours back
-sudo nos-m700 status        # active DPI stage, LED state
+sudo sinowealth-mouse light off     # scroll-wheel / DPI LED off (scrolling is unaffected)
+sudo sinowealth-mouse light on      # colours back
+sudo sinowealth-mouse status        # device, active DPI stage, LED state
 ```
 
-`wheel off|on` is an alias of `light off|on`. **Status: working, confirmed on hardware
-2026-09-29.**
+Version **2.0.0**. v1 users: `nos-m700` still works (see [Upgrading from v1](#upgrading-from-v1-nos-m700)).
 
----
+## Device support
 
-## TL;DR: how it works
+| Brand / model | USB ID | Firmware | Support level | Evidence |
+|---|---|---|---|---|
+| **NOS M-700 RGB** (Nordic brand sold by Gigantti / Elkjøp) | 258a:0029 | `2616` | ✅ **CONFIRMED on hardware** | this repo |
+| Everest GT-100 RGB, Machenike M620, Mad Dog GM905 | 258a:0029 | other (V127, V287 seen) | PROTOCOL_MATCH | OpenRGB [2], libratbag [9][11] |
+| Glorious Model O / O- | 258a:0036 | any | PROTOCOL_MATCH | gloriousctl [1], OpenRGB [2], libratbag [8] |
+| Glorious Model D / D- | 258a:0033 | any | PROTOCOL_MATCH | OpenRGB [2], libratbag [8] |
+| Glorious Model O (old fw), Genesis Xenon 770, DreamMachines DM5 Blink | 258a:0027 | any | PROTOCOL_MATCH | libratbag [8] |
+| G-Wolves Hati HT-M (wired, no LEDs) | 258a:0027 | any | PROTOCOL_MATCH (nothing to switch) | libratbag |
+| Inphic PG2 | 258a:0028 | any | EXPERIMENTAL | libratbag [12] |
+| T-Dagger Imperial T-TGM310 | 258a:0051 | any | EXPERIMENTAL | libratbag |
+| Marvo Scorpion G961 | 258a:1007 | any | EXPERIMENTAL | libratbag |
+| Genesis Xenon 200, ZET Fury Pro | 258a:1007 | any | not compatible: different protocol | OpenRGB [2] |
+| Glorious Model O / D **Wireless** | 258a:2011 / 2012 / 2022 / 2023 | any | UNSUPPORTED (different protocol) | OpenRGB [2] |
+| Sinowealth keyboards | 258a:0016 / 0090 / 010c | any | UNSUPPORTED (keyboard protocol) | OpenRGB [2] |
 
-- The mouse uses a **Sinowealth** controller (`258a:0029`), the same family as the Glorious
-  Model O. Its settings live in a **131-byte config block**, read and written with HID
-  *feature reports* 4 and 5.
-- The scroll-wheel LED isn't an independent light. It's the **DPI-stage indicator**: it
-  shows the colour stored for the currently active DPI stage.
-- There's no "LED off" flag, but colour **`000000` = off**. `light off` writes black into
-  all 8 DPI-stage colour slots. DPI switching still works; the indicator just shows
-  "black" for every stage.
+**Support levels**
 
----
+| Level | Meaning | Writes |
+|---|---|---|
+| `CONFIRMED` | tested on real hardware with this tool (PID **and** firmware match) | allowed |
+| `PROTOCOL_MATCH` | same protocol according to upstream open-source projects; not tested here | only with `--experimental` |
+| `EXPERIMENTAL` | expected compatible, weaker or mixed evidence | only with `--experimental` |
+| `UNKNOWN` | not in the table; needs an explicit `--pid` | read-only unless `--experimental` |
+| `UNSUPPORTED` | known different protocol | refused; no vendor commands sent |
 
-## Which mice may this work with?
+Only NOS M-700 firmware `2616` is confirmed. Other devices listed here haven't been tested on
+hardware by this project. If you try one, please open an issue with the output of
+`sinowealth-mouse info` and `read-config`.
 
-Anything with **USB vendor ID `258a` (SINOWEALTH)** that uses the Glorious-Model-O-style
-report 4 / report 5 config protocol. To check your mouse on macOS:
+The table lives in [`src/devices.c`](src/devices.c); `sinowealth-mouse devices` prints it.
+Many more unbranded 258a mice from AliExpress and Amazon (sold as "Model O clones",
+"honeycomb ultralight") probably use the same firmware.
+
+## The key discovery: the wheel light is the DPI-stage indicator
+
+The scroll-wheel LED on these mice isn't controlled by the normal RGB effect (config byte
+`0x35`); on the NOS M-700 that effect is already `0x00` "off" from the factory while the wheel
+still glows. The wheel LED is the **DPI-stage indicator**. It shows the colour stored for the
+currently active DPI stage:
+
+```
+config[0x0b] >> 4                → active DPI stage (1-based)
+config[0x1d + 3*(stage-1) .. +2] → R, G, B shown on the wheel / DPI LED
+```
+
+There's no LED on/off flag, but **RGB `000000` effectively disables the LED**.
+`light off` writes black into all 8 stage slots (`0x1d–0x34`), so the LED stays dark on every
+stage while DPI switching keeps working. `light on` restores the saved colours. The full
+story is in [Reverse-engineering the NOS M-700](#1-reverse-engineering-the-nos-m-700-step-by-step).
+
+## Using it with other Sinowealth mice
+
+Find your mouse's product ID:
 
 ```bash
 ioreg -r -c IOHIDDevice -l | grep -E '"(Product|VendorID|ProductID)"'
 ```
 
-VendorID `9610` = `0x258a`. Convert the ProductID to hex and pass it with `--pid`, then start
-with the **read-only** commands:
+VendorID `9610` = `0x258a`. Convert the ProductID to hex. With no `--pid`, the tool
+auto-selects the single known (non-unsupported) Sinowealth device present; unknown PIDs are
+never auto-selected. Start read-only:
 
 ```bash
-nos-m700 --pid 0036 info
+sinowealth-mouse --pid 0036 info
 ```
 
 ```bash
-sudo nos-m700 --pid 0036 read-config mymouse.bin
+sudo sinowealth-mouse --pid 0036 read-config mymouse.bin
 ```
 
-If the config reads back as 123–167 bytes starting `04 11`, `light off` will very likely work
-too. Keep your dump so you can `restore` it.
+If the config reads back as 123–167 bytes starting `04 11`, the layout very likely matches.
+Keep that dump, then opt in to writes explicitly:
 
-| Brand / model | USB ID | Status | Source |
-|---|---|---|---|
-| **NOS M-700 RGB** (Nordic brand sold by Gigantti / Elkjøp) | 258a:0029 | ✅ **verified** | this repo |
-| Everest GT-100 RGB | 258a:0029 | same ID, should work | OpenRGB [2] |
-| Machenike M620 | 258a:0029 | same ID, should work | libratbag [9][11] |
-| Mad Dog GM905 | 258a:0029 | same ID, should work | libratbag [9] |
-| Glorious Model O / O- | 258a:0036 | same protocol, try `--pid 0036` | [1][2][8] |
-| Glorious Model D / D- | 258a:0033 | same protocol, try `--pid 0033` | [2][8] |
-| Glorious Model O (old firmware) | 258a:0027 | same protocol | libratbag |
-| Genesis Xenon 770 | 258a:0027 | same protocol | libratbag |
-| DreamMachines DM5 Blink | 258a:0027 | same protocol | libratbag |
-| G-Wolves Hati HT-M (wired) | 258a:0027 | no LEDs | libratbag |
-| Inphic PG2 | 258a:0028 | related | libratbag [12] |
-| T-Dagger Imperial T-TGM310 | 258a:0051 | related | libratbag |
-| Marvo Scorpion G961 | 258a:1007 | related, different controller variant | libratbag |
-| Genesis Xenon 200, ZET Fury Pro | 258a:1007 | **different protocol** (OpenRGB has separate drivers) | OpenRGB [2] |
-| Glorious Model O / D **Wireless** | 258a:2011 / 2012 / 2022 / 2023 | **different protocol** | OpenRGB [2] |
+```bash
+sudo sinowealth-mouse --pid 0036 --experimental light off
+```
 
-Many more unbranded or rebranded 258a mice from AliExpress and Amazon (often sold as
-"Model O clones", "honeycomb ultralight") use the same firmware. **Sinowealth keyboards
-(`258a:0016`, `0090`, `010c`, …) use a different protocol**, so don't use this tool on them.
+To undo:
+
+```bash
+sudo sinowealth-mouse --pid 0036 --experimental restore mymouse.bin
+```
+
+## Safety model
+
+- **Read-modify-write of the full config block.** The whole block is read, only the LED
+  bytes are changed, and everything else (DPI values, sensor, polling rate, buttons) is
+  written back unchanged.
+- **Checks before writing:** support level (above), config length 123–167 (131 expected
+  for the NOS M-700), and header `04 <cmd>`.
+- **Backup before every write:** the pre-write config goes to
+  `~/.sinowealth-mouse/backup-<vid>-<pid>.bin` (`restore` accepts it). `poke` also writes
+  `config-before-poke.bin` in the current directory.
+- **Write marker and padding:** byte `0x03` = config length − 8 (`0x7B` for 131 bytes), and
+  the report is zero-padded to 520 bytes, as gloriousctl, OpenRGB and libratbag do.
+- **Read-back verification** after every write. A mismatch is reported as an error.
+- **LED colours are saved** to `~/.sinowealth-mouse/state-<vid>-<pid>.bin` by `light off`
+  and restored by `light on`. Black stages fall back to the default palette.
+- **UNSUPPORTED devices** (wireless Glorious, Sinowealth keyboards) never get vendor
+  commands, because `05 xx` means something else on them.
+- Under `sudo`, files go to the invoking user's home and are `chown`ed back to them.
+
+## Upgrading from v1 (`nos-m700`)
+
+- `sudo make install` installs `sinowealth-mouse` and replaces `/usr/local/bin/nos-m700` with
+  a **symlink** to it. There's one implementation; `sudo nos-m700 light off` keeps working.
+- v1 saved colours in `~/.nos-m700-state.bin`. v2 reads that file for `258a:0029` if the new
+  state file doesn't exist yet, so `light on` after a v1 `light off` restores your colours.
+- Behaviour on the NOS M-700 (firmware `2616`) is unchanged.
+
+## Architecture
+
+| File | Role |
+|---|---|
+| [`src/sinowealth.c`](src/sinowealth.c) / `.h` | generic Sinowealth HID transport and protocol: enumeration, feature reports, command channel, config read/write, layout offsets |
+| [`src/devices.c`](src/devices.c) / `.h` | device table: USB ID, firmware, name, support level, expected config size, quirks |
+| [`src/main.c`](src/main.c) | CLI: device selection, safety checks, lighting, diagnostics, decoder |
+
+Adding a model is one row in `devices.c`. Plain C11, `clang`, IOKit and CoreFoundation;
+no other dependencies.
 
 ### Who benefits
 
@@ -89,7 +151,7 @@ Many more unbranded or rebranded 258a mice from AliExpress and Amazon (often sol
 
 ---
 
-## 1. How we got there (step by step)
+## 1. Reverse-engineering the NOS M-700 (step by step)
 
 ### Step 1: Identify the device
 `ioreg -r -c IOHIDDevice -l` showed the mouse as **`SINOWEALTH` / `Wired Gaming Mouse`,
@@ -304,12 +366,14 @@ config[0x1d + 3*(s-1) ..]  → R, G, B shown on the wheel LED
 
 `light off`:
 1. Read the config (`05 11` → report 4).
-2. Save the 24 colour bytes (and the effect byte) to `~/.nos-m700-state.bin`. Under sudo
-   it uses `SUDO_USER`'s home and `chown`s the file back to them.
+2. Back up the full config to `~/.sinowealth-mouse/backup-<vid>-<pid>.bin`, and save the 24
+   colour bytes (and the effect byte) to `~/.sinowealth-mouse/state-<vid>-<pid>.bin`.
+   (v1 used `~/.nos-m700-state.bin`.) Under sudo it uses `SUDO_USER`'s home and `chown`s
+   the files back to them.
 3. Write `00` to all 24 bytes at `0x1d–0x34`, so every stage is dark and DPI cycling can't
    bring the light back.
-4. Set `0x03 = 0x7B`, pad to 520 bytes, `SET_FEATURE` report 4.
-5. Wait 100 ms, read again and compare bytes 4–130. Warn if they differ.
+4. Set `0x03 = 0x7B` (config length − 8), pad to 520 bytes, `SET_FEATURE` report 4.
+5. Wait 100 ms, read again and compare bytes 4–130. Report an error if they differ.
 
 `light on` writes the saved colours back. Any stage that's black, and all of them if there's
 no save file, gets the factory palette. This matters because the manual stage-1 test left a
@@ -323,8 +387,8 @@ practice `all off` = `light off`.
 
 ## 5. macOS implementation notes
 
-- **API:** `IOHIDManagerCreate` → match `{VendorID: 0x258A, ProductID: 0x0029}` →
-  `IOHIDManagerCopyDevices`. The manager itself is never opened (that would open the mouse
+- **API:** `IOHIDManagerCreate` → match `{VendorID: 0x258A}` (plus `ProductID` with
+  `--pid`) → `IOHIDManagerCopyDevices`. The manager itself is never opened (that would open the mouse
   interface too). The vendor interface is chosen as the one with
   `MaxFeatureReportSize ≥ 520`.
 - **I/O:** `IOHIDDeviceOpen` → `IOHIDDeviceSetReport(kIOHIDReportTypeFeature, id, buf, len)`
@@ -335,7 +399,10 @@ practice `all off` = `light off`.
 - **Permissions:** the keyboard collection on interface 1 triggers the Input Monitoring TCC
   check. The tool calls `IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)` so macOS shows the
   prompt. Otherwise use `sudo`.
-- **Build:** `clang -framework IOKit -framework CoreFoundation`; one C file, no dependencies.
+- **Firmware-aware matching:** the config interface is opened, the firmware is read with
+  `05 01`, and the device table is consulted again. The NOS M-700 is CONFIRMED only with
+  firmware `2616`.
+- **Build:** `clang -framework IOKit -framework CoreFoundation`; three C files, no dependencies.
 
 ---
 
@@ -373,7 +440,9 @@ make
 sudo make install
 ```
 
-Installs to `/usr/local/bin/nos-m700`. Needs the Xcode command-line tools.
+Installs `/usr/local/bin/sinowealth-mouse` plus the `nos-m700` compatibility symlink
+(`PREFIX` / `DESTDIR` are honoured; `sudo make uninstall` removes both). Needs the Xcode
+command-line tools.
 
 To run without sudo, add your terminal app under System Settings › Privacy & Security ›
 **Input Monitoring** and restart it.
@@ -386,8 +455,10 @@ To run without sudo, add your terminal app under System Settings › Privacy & S
 | `wheel off\|on` | **yes** | alias of `light` |
 | `side off\|on` | **yes** | main RGB effect byte 0x35 off / restore |
 | `all off\|on` | **yes** | `light` + `side` |
-| `status` | read command only | active DPI stage, wheel LED state, effect |
-| `info` | no | device + HID interface summary |
+| `status` | read command only | device, support level, active DPI stage, wheel LED state, effect |
+| `info` | firmware query only | device, firmware, support level, HID interfaces |
+| `devices` | no device needed | known devices and support levels |
+| `version` | no device needed | print the version (`--version` works too) |
 | `descriptors [--raw]` | no | hex dump + parsed report descriptors + report sizes |
 | `probe` | read commands only | firmware, active profile, all profile configs, button map |
 | `read-config [file]` | read command only | read, dump, decode, optionally save the config block |
@@ -398,15 +469,15 @@ To run without sudo, add your terminal app under System Settings › Privacy & S
 | `poke <off> <val> …` | **yes** | back up → patch bytes → write → verify |
 | `restore <file>` | **yes** | write a saved dump back |
 
-Options: `-v` prints every SET_FEATURE payload; `-p N` selects profile 1–3 for
-`read-config` / `poke` / `restore`; `--vid` / `--pid` (hex) target another Sinowealth mouse
-(default `258a:0029`).
+Options: `--pid <hex>` / `--vid <hex>` select a device (default: auto-detect a known
+`258a` mouse); `--experimental` allows writes to non-confirmed devices; `-p N` selects
+profile 1–3; `-v` prints every SET_FEATURE payload.
 
 To get back to the exact factory state, restore the factory dump. Note that this also sets the
 active DPI stage back to 6:
 
 ```bash
-sudo nos-m700 restore config-baseline.bin
+sudo sinowealth-mouse restore config-baseline.bin
 ```
 
 ## Files
@@ -414,11 +485,15 @@ sudo nos-m700 restore config-baseline.bin
 | Path | Purpose |
 |---|---|
 | `src/main.c` | the CLI |
-| `Makefile` | build / install |
+| `src/sinowealth.c`, `src/sinowealth.h` | generic transport / protocol |
+| `src/devices.c`, `src/devices.h` | device table |
+| `Makefile` | build / install (`sinowealth-mouse` + `nos-m700` symlink) |
 | `config-baseline.bin` | factory config dump, 131 bytes (2026-09-29) |
 | `dumps/config-p1.bin`, `dumps/config-p2.bin`, `dumps/buttons-p1.bin` | `probe` output |
 | `dumps/m0.bin`, `dumps/m1.bin` | before/after the DPI press that revealed byte 0x0b |
-| `~/.nos-m700-state.bin` | colours saved by `light off` for `light on` |
+| `~/.sinowealth-mouse/state-<vid>-<pid>.bin` | colours saved by `light off` for `light on` |
+| `~/.sinowealth-mouse/backup-<vid>-<pid>.bin` | full config before the last write |
+| `~/.nos-m700-state.bin` | v1 state file, still read for 258a:0029 |
 
 ## Optional: USB captures from the Windows software
 

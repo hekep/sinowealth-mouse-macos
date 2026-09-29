@@ -1,14 +1,31 @@
 CC      ?= clang
 CFLAGS  ?= -O2 -Wall -Wextra -std=c11
 LDFLAGS += -framework IOKit -framework CoreFoundation
+PREFIX  ?= /usr/local
 
-nos-m700: src/main.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+PROG    = sinowealth-mouse
+ALIAS   = nos-m700
+SRCS    = src/main.c src/sinowealth.c src/devices.c
+HDRS    = src/sinowealth.h src/devices.h
 
-install: nos-m700
-	install -m 755 nos-m700 /usr/local/bin/nos-m700
+all: $(PROG) $(ALIAS)
+
+$(PROG): $(SRCS) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
+
+# Backward-compatible name for v1 users: a symlink to the same binary.
+$(ALIAS): $(PROG)
+	ln -sf $(PROG) $(ALIAS)
+
+install: $(PROG)
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 $(PROG) $(DESTDIR)$(PREFIX)/bin/$(PROG)
+	ln -sf $(PROG) $(DESTDIR)$(PREFIX)/bin/$(ALIAS)
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/$(PROG) $(DESTDIR)$(PREFIX)/bin/$(ALIAS)
 
 clean:
-	rm -f nos-m700
+	rm -f $(PROG) $(ALIAS)
 
-.PHONY: install clean
+.PHONY: all install uninstall clean
